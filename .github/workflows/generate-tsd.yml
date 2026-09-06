@@ -1,0 +1,71 @@
+name: Generate iFlow Technical Specification Document
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "iflows/**.zip"   # adjust to wherever your CPI iFlow exports land
+  workflow_dispatch:
+    inputs:
+      iflow_path:
+        description: "Path to a specific iFlow zip to (re)generate (optional, generates all changed ones if empty)"
+        required: false
+
+jobs:
+  generate-tsd:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2   # need previous commit to diff changed files
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install python-docx
+
+      - name: Install Ubuntu font (for correct rendering if opened on Linux)
+        run: sudo apt-get update -y && sudo apt-get install -y fonts-ubuntu || true
+
+      - name: Determine changed iFlow zips
+        id: changed
+        shell: bash
+        run: |
+          mkdir -p docs/generated-tsd
+          if [ -n "${{ github.event.inputs.iflow_path }}" ]; then
+            echo "files=${{ github.event.inputs.iflow_path }}" >> "$GITHUB_OUTPUT"
+          else
+            FILES=$(git diff --name-only HEAD~1 HEAD -- 'iflows/*.zip' || true)
+            if [ -z "$FILES" ]; then
+              # fallback: on first run / manual dispatch, process everything present
+              FILES=$(find iflows -name '*.zip' 2>/dev/null || true)
+            fi
+            echo "files<<EOF" >> "$GITHUB_OUTPUT"
+            echo "$FILES" >> "$GITHUB_OUTPUT"
+            echo "EOF" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Generate TSD for each changed iFlow
+        shell: bash
+        run: |
+          while IFS= read -r ZIP; do
+            [ -z "$ZIP" ] && continue
+            echo "Processing $ZIP"
+            BASENAME=$(basename "$ZIP" .zip)
+            python scripts/parse_iflow.py "$ZIP" "/tmp/${BASENAME}.json"
+            python scripts/generate_tsd.py "/tmp/${BASENAME}.json" "docs/generated-tsd/${BASENAME}_TSD.docx"
+          done <<< "${{ steps.changed.outputs.files }}"
+
+      - name: Commit generated documents
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/generated-tsd/*.docx
+          git diff --cached --quiet || git commit -m "chore: auto-generate TSD document(s) [skip ci]"
+          git push
